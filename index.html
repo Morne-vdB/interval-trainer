@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Interval Trainer</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1a1a2e">
+
+  <!-- iOS PWA support -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Intervals">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 1.5rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    /* Setup Screen */
+    #setup {
+      text-align: center;
+      width: 90%;
+      max-width: 400px;
+    }
+
+    .input-group {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0.8rem 0;
+      background: #16213e;
+      padding: 0.8rem 1.2rem;
+      border-radius: 12px;
+    }
+
+    .input-group label {
+      font-size: 1rem;
+      color: #aaa;
+    }
+
+    .input-group input {
+      width: 80px;
+      text-align: center;
+      font-size: 1.2rem;
+      padding: 0.4rem;
+      border: none;
+      border-radius: 8px;
+      background: #0f3460;
+      color: #fff;
+      outline: none;
+    }
+
+    .input-group input:focus {
+      box-shadow: 0 0 0 2px #e94560;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 0.9rem 2.5rem;
+      font-size: 1.1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 50px;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .btn:active { transform: scale(0.96); }
+
+    .btn-start {
+      background: linear-gradient(135deg, #e94560, #c23152);
+      color: #fff;
+      margin-top: 1.5rem;
+      box-shadow: 0 4px 20px rgba(233, 69, 96, 0.4);
+    }
+
+    .btn-start:hover { box-shadow: 0 6px 28px rgba(233, 69, 96, 0.6); }
+
+    /* Timer Screen */
+    #timer {
+      display: none;
+      text-align: center;
+      width: 90%;
+      max-width: 400px;
+    }
+
+    #phase-label {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 0.5rem;
+    }
+
+    #round-label {
+      font-size: 1rem;
+      color: #aaa;
+      margin-bottom: 1.5rem;
+    }
+
+    .timer-ring-container {
+      position: relative;
+      width: 260px;
+      height: 260px;
+      margin: 0 auto 1.5rem;
+    }
+
+    .timer-ring-container svg {
+      transform: rotate(-90deg);
+    }
+
+    .ring-bg {
+      fill: none;
+      stroke: #16213e;
+      stroke-width: 10;
+    }
+
+    .ring-progress {
+      fill: none;
+      stroke-width: 10;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.3s linear, stroke 0.3s;
+    }
+
+    #countdown {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 4.5rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .controls {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      margin-top: 1rem;
+    }
+
+    .btn-pause {
+      background: #0f3460;
+      color: #fff;
+    }
+
+    .btn-pause:hover { background: #1a4a8a; }
+
+    .btn-reset {
+      background: #533483;
+      color: #fff;
+    }
+
+    .btn-reset:hover { background: #6b44a8; }
+
+    /* Phase colors */
+    .phase-work #phase-label { color: #e94560; }
+    .phase-work .ring-progress { stroke: #e94560; }
+    .phase-work #countdown { color: #e94560; }
+
+    .phase-rest #phase-label { color: #0be881; }
+    .phase-rest .ring-progress { stroke: #0be881; }
+    .phase-rest #countdown { color: #0be881; }
+
+    .phase-done #phase-label { color: #ffd32a; }
+    .phase-done .ring-progress { stroke: #ffd32a; }
+    .phase-done #countdown { color: #ffd32a; }
+
+    /* Prep countdown */
+    .phase-prep #phase-label { color: #4bcffa; }
+    .phase-prep .ring-progress { stroke: #4bcffa; }
+    .phase-prep #countdown { color: #4bcffa; }
+  </style>
+</head>
+<body>
+
+  <!-- Setup Screen -->
+  <div id="setup">
+    <h1>Interval Trainer</h1>
+    <div class="input-group">
+      <label>Work (sec)</label>
+      <input type="number" id="work-time" value="30" min="1" max="600">
+    </div>
+    <div class="input-group">
+      <label>Rest (sec)</label>
+      <input type="number" id="rest-time" value="15" min="1" max="600">
+    </div>
+    <div class="input-group">
+      <label>Rounds</label>
+      <input type="number" id="rounds" value="8" min="1" max="100">
+    </div>
+    <div class="input-group">
+      <label>Prep (sec)</label>
+      <input type="number" id="prep-time" value="5" min="0" max="30">
+    </div>
+    <button class="btn btn-start" onclick="startWorkout()">Start</button>
+  </div>
+
+  <!-- Timer Screen -->
+  <div id="timer">
+    <div id="phase-label">GET READY</div>
+    <div id="round-label">Round 1 / 8</div>
+    <div class="timer-ring-container">
+      <svg width="260" height="260" viewBox="0 0 260 260">
+        <circle class="ring-bg" cx="130" cy="130" r="115"></circle>
+        <circle class="ring-progress" id="ring" cx="130" cy="130" r="115"
+          stroke-dasharray="722.57" stroke-dashoffset="0"></circle>
+      </svg>
+      <div id="countdown">0</div>
+    </div>
+    <div class="controls">
+      <button class="btn btn-pause" id="btn-pause" onclick="togglePause()">Pause</button>
+      <button class="btn btn-reset" onclick="resetWorkout()">Reset</button>
+    </div>
+  </div>
+
+  <script>
+    // Register service worker for offline PWA support
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+
+    const CIRCUMFERENCE = 2 * Math.PI * 115; // ~722.57
+
+    let workTime, restTime, totalRounds, prepTime;
+    let currentRound, phase, secondsLeft, phaseDuration;
+    let interval = null;
+    let paused = false;
+
+    // Audio beeps using Web Audio API
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function beep(freq, duration, count = 1) {
+      for (let i = 0; i < count; i++) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        gain.gain.value = 0.3;
+        const start = audioCtx.currentTime + i * 0.35;
+        osc.start(start);
+        osc.stop(start + duration);
+      }
+    }
+
+    function shortBeep() { beep(660, 0.12); }
+    function longBeep() { beep(880, 0.4); }
+    function doneBeeps() { beep(1000, 0.15, 4); }
+
+    function startWorkout() {
+      audioCtx.resume();
+      workTime = parseInt(document.getElementById('work-time').value) || 30;
+      restTime = parseInt(document.getElementById('rest-time').value) || 15;
+      totalRounds = parseInt(document.getElementById('rounds').value) || 8;
+      prepTime = parseInt(document.getElementById('prep-time').value) || 5;
+
+      currentRound = 1;
+      paused = false;
+      document.getElementById('btn-pause').textContent = 'Pause';
+
+      document.getElementById('setup').style.display = 'none';
+      document.getElementById('timer').style.display = 'block';
+
+      if (prepTime > 0) {
+        setPhase('prep', prepTime);
+      } else {
+        setPhase('work', workTime);
+      }
+
+      interval = setInterval(tick, 1000);
+    }
+
+    function setPhase(newPhase, duration) {
+      phase = newPhase;
+      phaseDuration = duration;
+      secondsLeft = duration;
+
+      const timerEl = document.getElementById('timer');
+      timerEl.className = 'phase-' + phase;
+
+      const labels = { prep: 'GET READY', work: 'WORK', rest: 'REST', done: 'DONE!' };
+      document.getElementById('phase-label').textContent = labels[phase];
+      document.getElementById('round-label').textContent =
+        phase === 'done' ? 'Great workout!' : `Round ${currentRound} / ${totalRounds}`;
+
+      updateDisplay();
+    }
+
+    function tick() {
+      if (paused) return;
+
+      secondsLeft--;
+
+      if (secondsLeft <= 3 && secondsLeft > 0) shortBeep();
+
+      if (secondsLeft <= 0) {
+        longBeep();
+        nextPhase();
+      } else {
+        updateDisplay();
+      }
+    }
+
+    function nextPhase() {
+      if (phase === 'prep') {
+        setPhase('work', workTime);
+      } else if (phase === 'work') {
+        if (currentRound >= totalRounds) {
+          setPhase('done', 0);
+          clearInterval(interval);
+          interval = null;
+          doneBeeps();
+        } else {
+          setPhase('rest', restTime);
+        }
+      } else if (phase === 'rest') {
+        currentRound++;
+        setPhase('work', workTime);
+      }
+    }
+
+    function updateDisplay() {
+      const mins = Math.floor(secondsLeft / 60);
+      const secs = secondsLeft % 60;
+      document.getElementById('countdown').textContent =
+        mins > 0 ? `${mins}:${String(secs).padStart(2, '0')}` : secs;
+
+      const progress = phaseDuration > 0 ? (phaseDuration - secondsLeft) / phaseDuration : 1;
+      const offset = CIRCUMFERENCE * (1 - progress);
+      document.getElementById('ring').style.strokeDashoffset = offset;
+    }
+
+    function togglePause() {
+      paused = !paused;
+      document.getElementById('btn-pause').textContent = paused ? 'Resume' : 'Pause';
+    }
+
+    function resetWorkout() {
+      if (interval) clearInterval(interval);
+      interval = null;
+      paused = false;
+      document.getElementById('setup').style.display = 'block';
+      document.getElementById('timer').style.display = 'none';
+    }
+  </script>
+</body>
+</html>
