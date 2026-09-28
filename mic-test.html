@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Mic Test</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Mic Test">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e; color: #eee; margin: 0;
+      padding: calc(1.2rem + env(safe-area-inset-top)) 1.2rem 1.2rem;
+      -webkit-user-select: text; user-select: text;
+    }
+    h1 { font-size: 1.1rem; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 0.4rem; }
+    p { color: #99a; font-size: 0.85rem; line-height: 1.5; margin: 0 0 1rem; }
+    button {
+      padding: 0.9rem 2rem; font-size: 1rem; font-weight: 600; border: none;
+      border-radius: 50px; background: #e94560; color: #fff; letter-spacing: 1px;
+      text-transform: uppercase; margin: 0 0.5rem 1rem 0;
+    }
+    button.secondary { background: #0f3460; }
+    #log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem;
+      line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #9ab;
+      border-top: 1px solid #333; padding-top: 0.8rem;
+    }
+    audio { width: 100%; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Mic Test</h1>
+  <p>
+    Slice 1 throwaway test for the voice-note design. Record, then <strong>fully close this app</strong>
+    (swipe it away), reopen it, and record again. If the second attempt fails, iOS has the known
+    standalone-PWA recording bug and voice notes will use Apple's Voice Memos instead.
+  </p>
+
+  <button onclick="record()">Record 3s</button>
+  <button class="secondary" onclick="clearLog()">Clear log</button>
+
+  <audio id="playback" controls></audio>
+  <div id="log"></div>
+
+  <script>
+    const LOG_KEY = 'cairn.mictest.log.v1';
+    let entries = [];
+
+    try { entries = JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch (e) { entries = []; }
+    if (!Array.isArray(entries)) entries = [];
+
+    function log(message) {
+      entries.push(`${new Date().toISOString().slice(0, 19).replace('T', ' ')}  ${message}`);
+      try { localStorage.setItem(LOG_KEY, JSON.stringify(entries)); } catch (e) { /* ignore */ }
+      render();
+    }
+
+    function render() {
+      document.getElementById('log').textContent =
+        `standalone: ${window.navigator.standalone === true}\n` +
+        `MediaRecorder: ${typeof MediaRecorder !== 'undefined'}\n\n` +
+        entries.join('\n');
+    }
+
+    function clearLog() {
+      entries = [];
+      try { localStorage.removeItem(LOG_KEY); } catch (e) { /* ignore */ }
+      render();
+    }
+
+    async function record() {
+      log('requesting microphone...');
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        log(`getUserMedia FAILED: ${e.name} ${e.message}`);
+        return;
+      }
+      log('microphone granted');
+
+      let recorder;
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (e) {
+        log(`MediaRecorder FAILED: ${e.name} ${e.message}`);
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      const chunks = [];
+      recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      recorder.onerror = e => log(`recorder error: ${e.error && e.error.name}`);
+      recorder.onstop = () => {
+        // Releasing the mic matters: a held stream is one suspected cause of the reopen bug.
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/mp4' });
+        log(`stopped: ${blob.size} bytes, type ${blob.type || 'unknown'}`);
+        if (blob.size === 0) {
+          log('RESULT: FAILED (empty recording)');
+          return;
+        }
+        document.getElementById('playback').src = URL.createObjectURL(blob);
+        log('RESULT: OK, playback loaded');
+      };
+
+      try {
+        recorder.start();
+        log(`recording (state ${recorder.state}, mime ${recorder.mimeType || 'default'})`);
+      } catch (e) {
+        log(`start FAILED: ${e.name} ${e.message}`);
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 3000);
+    }
+
+    render();
+  </script>
+</body>
+</html>
