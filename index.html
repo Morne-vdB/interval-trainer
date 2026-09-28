@@ -194,6 +194,64 @@
     .phase-prep #phase-label { color: #4bcffa; }
     .phase-prep .ring-progress { stroke: #4bcffa; }
     .phase-prep #countdown { color: #4bcffa; }
+
+    /* Build info + diagnostics */
+    .meta {
+      margin-top: 1.4rem;
+      font-size: 0.75rem;
+      color: #556;
+      letter-spacing: 1px;
+    }
+
+    .meta a {
+      color: #667;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    #diagnostics {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #0d0d1a;
+      padding: 1rem;
+      padding-top: calc(1rem + env(safe-area-inset-top));
+      overflow-y: auto;
+      z-index: 10;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+    #diagnostics h2 {
+      font-size: 1rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 0.8rem;
+    }
+
+    #diag-log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.7rem;
+      line-height: 1.5;
+      color: #9ab;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin-bottom: 1rem;
+    }
+
+    .diag-buttons { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+    .btn-small {
+      padding: 0.5rem 1.1rem;
+      font-size: 0.8rem;
+      border: none;
+      border-radius: 50px;
+      background: #0f3460;
+      color: #fff;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -218,6 +276,9 @@
       <input type="number" id="prep-time" value="5" min="0" max="30">
     </div>
     <button class="btn btn-start" onclick="startWorkout()">Start</button>
+    <div class="meta">
+      <span id="version-label"></span> &middot; <a onclick="showDiagnostics()">Diagnostics</a>
+    </div>
   </div>
 
   <!-- Timer Screen -->
@@ -238,136 +299,460 @@
     </div>
   </div>
 
+  <!-- Diagnostics overlay: evidence for when a cue misbehaves -->
+  <div id="diagnostics">
+    <h2>Diagnostics</h2>
+    <div id="diag-log"></div>
+    <div class="diag-buttons">
+      <button class="btn-small" onclick="copyDiagnostics()">Copy</button>
+      <button class="btn-small" onclick="clearDiagnostics()">Clear</button>
+      <button class="btn-small" onclick="hideDiagnostics()">Close</button>
+    </div>
+  </div>
+
   <script>
-    // Register service worker for offline PWA support
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js');
+    const VERSION = '2026-09-28.1';
+    const CIRCUMFERENCE = 2 * Math.PI * 115; // ~722.57
+    const SETTINGS_KEY = 'cairn.trainer.settings.v1';
+    const LOG_KEY = 'cairn.trainer.log.v1';
+    const LOG_LIMIT = 300;
+
+    // Cues, as seconds before the end of a phase.
+    const COUNTDOWN_CUES = [3, 2, 1];
+
+    // ---------------------------------------------------------------- logging
+    // Kept in localStorage so a failure during a real workout survives the app
+    // being closed, and can be read back afterwards.
+    let logEntries = [];
+
+    function log(message) {
+      const stamp = new Date().toISOString().slice(11, 23);
+      logEntries.push(`${stamp} ${message}`);
+      if (logEntries.length > LOG_LIMIT) logEntries = logEntries.slice(-LOG_LIMIT);
+      try { localStorage.setItem(LOG_KEY, JSON.stringify(logEntries)); } catch (e) { /* storage blocked */ }
     }
 
-    const CIRCUMFERENCE = 2 * Math.PI * 115; // ~722.57
+    function loadLog() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+        if (Array.isArray(stored)) logEntries = stored;
+      } catch (e) { /* ignore unreadable log */ }
+    }
 
-    let workTime, restTime, totalRounds, prepTime;
-    let currentRound, phase, secondsLeft, phaseDuration;
-    let interval = null;
-    let paused = false;
-
-    // Audio beeps using Web Audio API
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-    function beep(freq, duration, count = 1) {
-      for (let i = 0; i < count; i++) {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-        gain.gain.value = 0.3;
-        const start = audioCtx.currentTime + i * 0.35;
-        osc.start(start);
-        osc.stop(start + duration);
+    // -------------------------------------------------------------- settings
+    function loadSettings() {
+      let stored = {};
+      try { stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {}; } catch (e) { /* ignore */ }
+      const fields = { work: 'work-time', rest: 'rest-time', rounds: 'rounds', prep: 'prep-time' };
+      for (const [key, id] of Object.entries(fields)) {
+        if (Number.isFinite(stored[key])) document.getElementById(id).value = stored[key];
       }
     }
 
-    function shortBeep() { beep(660, 0.12); }
-    function longBeep() { beep(880, 0.4); }
-    function doneBeeps() { beep(1000, 0.15, 4); }
+    function readSettings() {
+      const settings = {
+        work: parseInt(document.getElementById('work-time').value) || 30,
+        rest: parseInt(document.getElementById('rest-time').value) || 15,
+        rounds: parseInt(document.getElementById('rounds').value) || 8,
+        prep: parseInt(document.getElementById('prep-time').value) || 0,
+      };
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+      return settings;
+    }
+
+    // ----------------------------------------------------------------- audio
+    // iOS suspends or interrupts the audio context on notifications, calls,
+    // app switches and screen locks. Nothing recovers it on its own, so every
+    // plausible wake-up point calls ensureAudio(), and cues are scheduled on
+    // the audio clock in advance rather than fired from a JS tick.
+    let audioCtx = null;
+    let keepAlive = null;
+    let scheduledCues = new Set();
+    let cueNodes = [];
+
+    function createAudio() {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) return null;
+      const ctx = new Ctor();
+      ctx.onstatechange = () => {
+        log(`audio state: ${ctx.state}`);
+        if (ctx === audioCtx && ctx.state !== 'running' && running) ensureAudio();
+      };
+      if (navigator.audioSession) {
+        try { navigator.audioSession.type = 'playback'; } catch (e) { /* not supported */ }
+      }
+      return ctx;
+    }
+
+    function startKeepAlive() {
+      if (!audioCtx || keepAlive) return;
+      // A silent oscillator keeps the audio graph alive between cues, so iOS is
+      // less inclined to tear the session down mid-workout.
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      keepAlive = { osc, gain };
+    }
+
+    function stopKeepAlive() {
+      if (!keepAlive) return;
+      try { keepAlive.osc.stop(); } catch (e) { /* already stopped */ }
+      keepAlive = null;
+    }
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        audioCtx = createAudio();
+        if (!audioCtx) return;
+        log('audio created');
+      }
+      if (audioCtx.state === 'running') return;
+
+      audioCtx.resume().then(() => {
+        log('audio resumed');
+        // The audio clock stopped while suspended, so anything still queued would
+        // fire late. Drop it and re-time every remaining cue off the wall clock.
+        if (running && !paused) {
+          cancelCues();
+          scheduleCues();
+        }
+      }).catch(() => {
+        // A context iOS has torn down never comes back: replace it.
+        log(`audio resume failed (${audioCtx.state}), rebuilding`);
+        cueNodes = [];
+        scheduledCues.clear();
+        const dead = audioCtx;
+        audioCtx = null;
+        keepAlive = null;
+        try { dead.close(); } catch (e) { /* ignore */ }
+        audioCtx = createAudio();
+        if (audioCtx && running) {
+          startKeepAlive();
+          scheduleCues();
+        }
+      });
+    }
+
+    function beepAt(when, freq, duration) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'sine';
+      gain.gain.value = 0.3;
+      osc.start(when);
+      osc.stop(when + duration);
+      cueNodes.push({ osc, gain });
+    }
+
+    // Cancel beeps already queued on the audio clock (on pause, or before re-arming).
+    function cancelCues() {
+      for (const { osc, gain } of cueNodes) {
+        try { gain.gain.value = 0; } catch (e) { /* ignore */ }
+        try { osc.stop(audioCtx ? audioCtx.currentTime : 0); } catch (e) { /* ignore */ }
+        try { osc.disconnect(); gain.disconnect(); } catch (e) { /* ignore */ }
+      }
+      cueNodes = [];
+      scheduledCues.clear();
+    }
+
+    // Schedule every remaining cue of the current phase on the audio clock.
+    // Safe to call repeatedly: each cue is scheduled once per phase.
+    function scheduleCues() {
+      if (!audioCtx || audioCtx.state !== 'running' || !running || paused) return;
+      startKeepAlive();
+
+      const msLeft = phaseEndsAt - Date.now();
+      const lastPhase = phaseIndex === phases.length - 1;
+
+      for (const secondsBefore of COUNTDOWN_CUES) {
+        const key = `${phaseIndex}:${secondsBefore}`;
+        const delay = (msLeft - secondsBefore * 1000) / 1000;
+        if (scheduledCues.has(key) || delay <= 0) continue;
+        beepAt(audioCtx.currentTime + delay, 660, 0.12);
+        scheduledCues.add(key);
+      }
+
+      const endKey = `${phaseIndex}:end`;
+      const endDelay = msLeft / 1000;
+      if (!scheduledCues.has(endKey) && endDelay > 0) {
+        if (lastPhase) {
+          for (let i = 0; i < 4; i++) beepAt(audioCtx.currentTime + endDelay + i * 0.35, 1000, 0.15);
+        } else {
+          beepAt(audioCtx.currentTime + endDelay, 880, 0.4);
+        }
+        scheduledCues.add(endKey);
+      }
+    }
+
+    // ------------------------------------------------------------- wake lock
+    let wakeLock = null;
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator) || wakeLock) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+        log('wake lock held');
+      } catch (e) {
+        log(`wake lock failed: ${e.name}`);
+      }
+    }
+
+    function releaseWakeLock() {
+      if (!wakeLock) return;
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+
+    // --------------------------------------------------------------- session
+    // Phases are built up front and chained by absolute end times, so the
+    // session cannot drift no matter how the page is throttled.
+    let phases = [];
+    let phaseIndex = 0;
+    let phaseEndsAt = 0;      // Date.now() ms when the current phase ends
+    let pausedMsLeft = 0;
+    let running = false;
+    let paused = false;
+    let totalRounds = 0;
+    let loopHandle = null;
+    let safetyHandle = null;
+    let pendingReload = false;
+
+    function buildPhases(settings) {
+      const list = [];
+      if (settings.prep > 0) list.push({ type: 'prep', duration: settings.prep, round: 1 });
+      for (let round = 1; round <= settings.rounds; round++) {
+        list.push({ type: 'work', duration: settings.work, round });
+        if (round < settings.rounds) list.push({ type: 'rest', duration: settings.rest, round });
+      }
+      return list;
+    }
 
     function startWorkout() {
-      audioCtx.resume();
-      workTime = parseInt(document.getElementById('work-time').value) || 30;
-      restTime = parseInt(document.getElementById('rest-time').value) || 15;
-      totalRounds = parseInt(document.getElementById('rounds').value) || 8;
-      prepTime = parseInt(document.getElementById('prep-time').value) || 5;
-
-      currentRound = 1;
+      const settings = readSettings();
+      phases = buildPhases(settings);
+      totalRounds = settings.rounds;
+      phaseIndex = 0;
       paused = false;
-      document.getElementById('btn-pause').textContent = 'Pause';
+      running = true;
+      scheduledCues.clear();
+      phaseEndsAt = Date.now() + phases[0].duration * 1000;
 
+      document.getElementById('btn-pause').textContent = 'Pause';
       document.getElementById('setup').style.display = 'none';
       document.getElementById('timer').style.display = 'block';
 
-      if (prepTime > 0) {
-        setPhase('prep', prepTime);
-      } else {
-        setPhase('work', workTime);
-      }
-
-      interval = setInterval(tick, 1000);
+      log(`start: ${settings.work}/${settings.rest} x${settings.rounds}, prep ${settings.prep}`);
+      ensureAudio();
+      scheduleCues();
+      requestWakeLock();
+      renderPhase();
+      startLoop();
     }
 
-    function setPhase(newPhase, duration) {
-      phase = newPhase;
-      phaseDuration = duration;
-      secondsLeft = duration;
+    function startLoop() {
+      stopLoop();
+      const frame = () => {
+        tick();
+        if (running) loopHandle = requestAnimationFrame(frame);
+      };
+      loopHandle = requestAnimationFrame(frame);
+      // rAF stops when the page is hidden or throttled; this keeps phases moving.
+      safetyHandle = setInterval(tick, 250);
+    }
 
-      const timerEl = document.getElementById('timer');
-      timerEl.className = 'phase-' + phase;
+    function stopLoop() {
+      if (loopHandle) cancelAnimationFrame(loopHandle);
+      if (safetyHandle) clearInterval(safetyHandle);
+      loopHandle = null;
+      safetyHandle = null;
+    }
 
-      const labels = { prep: 'GET READY', work: 'WORK', rest: 'REST', done: 'DONE!' };
-      document.getElementById('phase-label').textContent = labels[phase];
-      document.getElementById('round-label').textContent =
-        phase === 'done' ? 'Great workout!' : `Round ${currentRound} / ${totalRounds}`;
+    function tick() {
+      if (!running || paused) return;
+
+      // Catch up through any phases that elapsed while the page was frozen.
+      while (Date.now() >= phaseEndsAt) {
+        const late = Date.now() - phaseEndsAt;
+        if (late > 1500) log(`phase ${phaseIndex} (${phases[phaseIndex].type}) ended ${late}ms late`);
+        if (phaseIndex >= phases.length - 1) {
+          finishWorkout();
+          return;
+        }
+        phaseIndex++;
+        // Chain from the scheduled end, not from now, so the session stays exact.
+        phaseEndsAt = phaseEndsAt + phases[phaseIndex].duration * 1000;
+        renderPhase();
+        scheduleCues();
+      }
 
       updateDisplay();
     }
 
-    function tick() {
-      if (paused) return;
+    function finishWorkout() {
+      running = false;
+      stopLoop();
+      stopKeepAlive();
+      releaseWakeLock();
+      log('workout complete');
 
-      secondsLeft--;
+      const timerEl = document.getElementById('timer');
+      timerEl.className = 'phase-done';
+      document.getElementById('phase-label').textContent = 'DONE!';
+      document.getElementById('round-label').textContent = 'Great workout!';
+      document.getElementById('countdown').textContent = '0';
+      document.getElementById('ring').style.strokeDashoffset = 0;
 
-      if (secondsLeft <= 3 && secondsLeft > 0) shortBeep();
-
-      if (secondsLeft <= 0) {
-        longBeep();
-        nextPhase();
-      } else {
-        updateDisplay();
-      }
+      if (pendingReload) location.reload();
     }
 
-    function nextPhase() {
-      if (phase === 'prep') {
-        setPhase('work', workTime);
-      } else if (phase === 'work') {
-        if (currentRound >= totalRounds) {
-          setPhase('done', 0);
-          clearInterval(interval);
-          interval = null;
-          doneBeeps();
-        } else {
-          setPhase('rest', restTime);
-        }
-      } else if (phase === 'rest') {
-        currentRound++;
-        setPhase('work', workTime);
-      }
+    function renderPhase() {
+      const phase = phases[phaseIndex];
+      const timerEl = document.getElementById('timer');
+      timerEl.className = 'phase-' + phase.type;
+
+      const labels = { prep: 'GET READY', work: 'WORK', rest: 'REST' };
+      document.getElementById('phase-label').textContent = labels[phase.type];
+      document.getElementById('round-label').textContent = `Round ${phase.round} / ${totalRounds}`;
+      updateDisplay();
     }
 
     function updateDisplay() {
+      const phase = phases[phaseIndex];
+      const msLeft = paused ? pausedMsLeft : Math.max(0, phaseEndsAt - Date.now());
+      const secondsLeft = Math.ceil(msLeft / 1000);
+
       const mins = Math.floor(secondsLeft / 60);
       const secs = secondsLeft % 60;
       document.getElementById('countdown').textContent =
         mins > 0 ? `${mins}:${String(secs).padStart(2, '0')}` : secs;
 
-      const progress = phaseDuration > 0 ? (phaseDuration - secondsLeft) / phaseDuration : 1;
-      const offset = CIRCUMFERENCE * (1 - progress);
-      document.getElementById('ring').style.strokeDashoffset = offset;
+      const total = phase.duration * 1000;
+      const progress = total > 0 ? (total - msLeft) / total : 1;
+      document.getElementById('ring').style.strokeDashoffset = CIRCUMFERENCE * (1 - progress);
     }
 
     function togglePause() {
+      if (!running) return;
       paused = !paused;
       document.getElementById('btn-pause').textContent = paused ? 'Resume' : 'Pause';
+
+      if (paused) {
+        pausedMsLeft = Math.max(0, phaseEndsAt - Date.now());
+        // Cues sit on the audio clock, so a pause has to take them off it.
+        cancelCues();
+        log(`paused with ${pausedMsLeft}ms left`);
+      } else {
+        phaseEndsAt = Date.now() + pausedMsLeft;
+        ensureAudio();
+        scheduleCues();
+        log('resumed');
+      }
+      updateDisplay();
+    }
+
+    function teardownAudio() {
+      if (!audioCtx) return;
+      cancelCues();
+      stopKeepAlive();
+      const dead = audioCtx;
+      audioCtx = null;
+      try { dead.close(); } catch (e) { /* ignore */ }
     }
 
     function resetWorkout() {
-      if (interval) clearInterval(interval);
-      interval = null;
+      running = false;
       paused = false;
+      stopLoop();
+      teardownAudio();
+      releaseWakeLock();
+      log('reset');
       document.getElementById('setup').style.display = 'block';
       document.getElementById('timer').style.display = 'none';
+      if (pendingReload) location.reload();
     }
+
+    // ----------------------------------------------------- lifecycle wake-ups
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return;
+      log('visible again');
+      if (running) {
+        if (!paused) {
+          ensureAudio();
+          tick();
+          scheduleCues();
+        }
+        requestWakeLock();
+      }
+      checkForUpdate();
+    });
+
+    // Any tap is a chance to get audio back if iOS took it away.
+    document.addEventListener('pointerdown', () => { if (running && !paused) ensureAudio(); });
+
+    // -------------------------------------------------------- diagnostics UI
+    function showDiagnostics() {
+      const wake = 'wakeLock' in navigator ? 'yes' : 'no';
+      const header = [
+        `version ${VERSION}`,
+        `audio ${audioCtx ? audioCtx.state : 'not created'}`,
+        `wake lock API ${wake}`,
+        `standalone ${window.navigator.standalone === true}`,
+        '',
+      ].join('\n');
+      document.getElementById('diag-log').textContent = header + logEntries.join('\n');
+      document.getElementById('diagnostics').style.display = 'block';
+    }
+
+    function hideDiagnostics() {
+      document.getElementById('diagnostics').style.display = 'none';
+    }
+
+    function copyDiagnostics() {
+      const text = document.getElementById('diag-log').textContent;
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+    }
+
+    function clearDiagnostics() {
+      logEntries = [];
+      try { localStorage.removeItem(LOG_KEY); } catch (e) { /* ignore */ }
+      document.getElementById('diag-log').textContent = '';
+    }
+
+    // ------------------------------------------------------- service worker
+    let swRegistration = null;
+
+    function checkForUpdate() {
+      if (swRegistration) swRegistration.update().catch(() => {});
+    }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').then(reg => {
+        swRegistration = reg;
+        reg.update().catch(() => {});
+      }).catch(() => {});
+
+      // A new version taking over mid-workout must not yank the page away.
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (running) {
+          pendingReload = true;
+          log('update waiting for end of workout');
+        } else {
+          location.reload();
+        }
+      });
+    }
+
+    // ------------------------------------------------------------- boot
+    loadLog();
+    loadSettings();
+    document.getElementById('version-label').textContent = `v${VERSION}`;
+    log(`loaded v${VERSION}`);
   </script>
 </body>
 </html>
